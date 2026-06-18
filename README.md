@@ -4,7 +4,7 @@ Aplikasi web sederhana untuk mendeteksi kemiripan dua wajah menggunakan pendekat
 **PCA (Principal Component Analysis)** yang dihitung melalui **SVD (Singular Value Decomposition)**,
 atau yang dikenal sebagai metode **Eigenfaces**.
 
-## 🔍 Alur Sistem
+## Alur Sistem
 
 1. **Upload** dua gambar wajah bebas.
 2. **Face Detection** — wajah dideteksi & di-crop otomatis menggunakan Haar Cascade (OpenCV).
@@ -15,14 +15,14 @@ atau yang dikenal sebagai metode **Eigenfaces**.
 7. **Cosine Similarity** — kemiripan dihitung dari sudut antara dua vektor hasil proyeksi (`z1`, `z2`).
 8. **Keputusan** — jika `similarity >= threshold` → **Mirip**, jika tidak → **Tidak Mirip**.
 
-## 🛠️ Teknologi
+## Teknologi
 
 - [Streamlit](https://streamlit.io/) — antarmuka web
 - [OpenCV](https://opencv.org/) — face detection (Haar Cascade) & image processing
 - [NumPy](https://numpy.org/) — operasi matriks/vektor
 - [Scikit-Learn](https://scikit-learn.org/) — PCA & cosine similarity
 
-## 🚀 Cara Menjalankan Secara Lokal
+## Cara Menjalankan Secara Lokal
 
 ```bash
 pip install -r requirements.txt
