@@ -33,19 +33,15 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3)
     """
     Deteksi wajah dengan Haar Cascade, lalu crop dengan margin proporsional.
 
-    Catatan penting: Haar Cascade kadang menghasilkan beberapa kandidat bbox untuk
-    satu wajah yang sama -- salah satunya bisa jadi area "kepala + leher/bahu" yang
-    kebesaran (bukan wajah murni). Kalau langsung ambil bbox dengan area terbesar
-    (seperti versi sebelumnya), itu bisa salah pilih kandidat yang kebesaran ini,
-    sehingga rasio crop antar foto jadi tidak konsisten (foto A ke-crop pas di wajah,
-    foto B ke-crop sampai bahu) -- akibatnya PCA menangkap "seberapa ketat crop-nya"
-    bukan fitur wajah itu sendiri. Untuk mengurangi risiko ini, kandidat bbox difilter
-    dulu berdasarkan rasio ukuran yang wajar untuk wajah (sekitar 20-45% dari lebar
-    gambar); kalau tidak ada yang masuk rentang itu, fallback ke kandidat terkecil
-    (lebih aman daripada kandidat yang kebesaran).
-
-    Margin ditambahkan di semua sisi supaya dahi dan dagu konsisten ikut ter-crop,
-    membantu alignment antar foto yang berbeda jarak/sudut kamera.
+    Catatan: Haar Cascade kadang menghasilkan beberapa kandidat bbox untuk satu
+    wajah yang sama -- salah satunya bisa jadi area "kepala + leher/bahu" yang
+    kebesaran (bukan wajah murni). Kalau langsung ambil bbox dengan area terbesar,
+    itu bisa salah pilih kandidat yang kebesaran ini, sehingga rasio crop antar
+    foto jadi tidak konsisten dan PCA jadi menangkap "seberapa ketat crop-nya"
+    bukan fitur wajah itu sendiri. Untuk mengurangi risiko ini, kandidat bbox
+    difilter dulu berdasarkan rasio ukuran yang wajar untuk wajah (20-45% dari
+    lebar gambar); kalau tidak ada yang masuk rentang itu, fallback ke kandidat
+    terkecil (lebih aman daripada kandidat yang kebesaran).
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
@@ -68,7 +64,6 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3)
         x, y, w, h = max(candidates_in_range, key=lambda f: f[2] * f[3])
     else:
         # tidak ada kandidat dengan rasio wajar -> ambil yang terkecil sebagai fallback
-        # (lebih aman daripada salah ambil area kepala+bahu yang kebesaran)
         x, y, w, h = min(faces, key=lambda f: f[2] * f[3])
 
     mx, my = int(w * margin), int(h * margin)
@@ -113,17 +108,21 @@ def process_uploaded_image(uploaded_file, face_cascade):
     }
 
 
-def augment_face(face_img_100x100: np.ndarray, rng: np.random.Generator, n_variations: int = 40) -> list:
+def augment_face(face_img_100x100: np.ndarray, rng: np.random.Generator, n_variations: int = 50) -> list:
     """
     Bikin variasi (augmentasi) dari SATU gambar wajah yang sudah di-resize 100x100.
     Setiap variasi tetap wajah yang SAMA secara struktur (mata/hidung/mulut di posisi
     yang konsisten secara relatif), hanya beda pose ringan (rotasi, scaling, translasi
-    kecil), pencahayaan, flip, dan noise halus. Parameter diambil secara acak kontinu
-    (bukan grid kombinasi tetap) supaya variasi lebih kaya dan tidak ada pola berulang
-    yang bisa dipelajari PCA sebagai "fitur palsu".
+    kecil), pencahayaan, flip, dan noise halus.
 
-    Ini supaya PCA dilatih dari variasi wajah ASLI, bukan dari noise acak yang tidak
-    ada hubungannya dengan struktur wajah manusia.
+    Ini menggantikan pendekatan sebelumnya yang memakai noise acak murni + blur sebagai
+    dataset training. Noise acak tidak punya struktur wajah sama sekali, sehingga arah
+    eigenvector yang dihasilkan PCA tidak ada hubungannya dengan fitur wajah manusia --
+    similarity yang dihasilkan jadi tergantung seed acak (terbukti goyang antara positif
+    dan negatif kalau seed diganti). Dengan augmentasi dari wajah ASLI yang diupload,
+    struktur wajah (posisi mata, hidung, kontur) tetap konsisten di semua sampel training,
+    sehingga PCA belajar arah-arah variasi yang relevan secara visual -- sesuai prinsip
+    dasar Eigenfaces (Turk & Pentland).
     """
     variations = []
     h, w = face_img_100x100.shape
@@ -154,20 +153,20 @@ def augment_face(face_img_100x100: np.ndarray, rng: np.random.Generator, n_varia
     return variations
 
 
-def build_training_dataset(face1_equalized: np.ndarray, face2_equalized: np.ndarray):
+def build_training_dataset(face1_equalized: np.ndarray, face2_equalized: np.ndarray, n_variations: int = 50):
     """
     Bangun dataset training untuk PCA dari AUGMENTASI dua wajah yang diupload
     (bukan dari noise acak). Karena tidak ada dataset wajah orang lain yang
     tersedia, training set diperluas dengan augmentasi (rotasi ringan, flip,
-    perubahan brightness, noise halus) dari kedua foto asli. Ini menjaga
-    struktur wajah tetap konsisten sehingga PCA bisa belajar arah-arah variasi
-    yang benar-benar relevan terhadap fitur wajah (eigenfaces yang valid),
+    perubahan brightness, translasi kecil, noise halus) dari kedua foto asli.
+    Ini menjaga struktur wajah tetap konsisten sehingga PCA bisa belajar arah-arah
+    variasi yang benar-benar relevan terhadap fitur wajah (eigenfaces yang valid),
     bukan arah dari noise acak yang tidak punya makna visual.
     """
     rng = np.random.default_rng(seed=42)
 
-    aug_1 = augment_face(face1_equalized, rng, n_variations=40)
-    aug_2 = augment_face(face2_equalized, rng, n_variations=40)
+    aug_1 = augment_face(face1_equalized, rng, n_variations=n_variations)
+    aug_2 = augment_face(face2_equalized, rng, n_variations=n_variations)
 
     all_faces = aug_1 + aug_2
     X = np.array([f.flatten() / 255.0 for f in all_faces])
@@ -186,7 +185,7 @@ def compute_pca_similarity(face1_equalized: np.ndarray, face2_equalized: np.ndar
     pca = PCA(n_components=n_components)
     pca.fit(X_train)
 
-    # proyeksikan dua wajah ASLI (bukan versi augmentasi) ke ruang PCA
+    # proyeksikan dua wajah ASLI (bukan dataset training) ke ruang PCA
     Z = pca.transform(np.array([vector_1, vector_2]))
 
     z1 = Z[0].reshape(1, -1)
@@ -216,9 +215,9 @@ st.markdown(
 
     **Alur proses:** Upload gambar → Deteksi & crop wajah (Haar Cascade) →
     Preprocessing (grayscale, resize, histogram equalization, normalisasi, flatten) →
-    Augmentasi kedua wajah (rotasi, flip, brightness) untuk membentuk dataset training →
-    PCA dilatih dari dataset hasil augmentasi → Proyeksi kedua wajah asli ke ruang PCA →
-    Hitung **cosine similarity** → Keputusan mirip / tidak mirip.
+    Augmentasi kedua wajah (rotasi, flip, brightness, translasi) untuk membentuk dataset
+    training → PCA dilatih dari dataset hasil augmentasi → Proyeksi kedua wajah asli ke
+    ruang PCA → Hitung **cosine similarity** → Keputusan mirip / tidak mirip.
     """
 )
 
@@ -230,23 +229,23 @@ with st.sidebar:
         "Threshold Cosine Similarity",
         min_value=0.0,
         max_value=1.0,
-        value=0.5,
+        value=0.15,
         step=0.01,
-        help="Jika similarity >= threshold, wajah dianggap mirip.",
+        help="Jika similarity >= threshold, wajah dianggap mirip. Nilai default disesuaikan karena dataset training berbasis augmentasi 2 foto (bukan ratusan wajah asli dari banyak orang seperti pada dataset ideal).",
     )
     n_components = st.slider(
         "Jumlah Komponen Utama PCA (k)",
         min_value=2,
         max_value=30,
         value=15,
-        help="Jumlah dimensi hasil reduksi PCA. PCA dilatih dari dataset augmentasi, lalu kedua wajah asli diproyeksikan ke ruang ini.",
+        help="Jumlah dimensi hasil reduksi PCA. PCA dilatih dari dataset hasil augmentasi, lalu kedua wajah asli diproyeksikan ke ruang ini.",
     )
     st.caption(
         "ℹ️ PCA dilatih dari dataset hasil **augmentasi** kedua wajah yang diupload "
-        "(rotasi ringan, flip horizontal, perubahan brightness, noise halus) — karena "
-        "tidak ada dataset wajah orang lain yang tersedia. Augmentasi menjaga struktur "
-        "wajah tetap konsisten, sehingga PCA belajar arah variasi yang relevan secara "
-        "visual (bukan dari noise acak)."
+        "(rotasi ringan, flip horizontal, perubahan brightness, translasi kecil, noise "
+        "halus) -- karena tidak ada dataset wajah orang lain yang tersedia. Augmentasi "
+        "menjaga struktur wajah tetap konsisten, sehingga PCA belajar arah variasi yang "
+        "relevan secara visual (bukan dari noise acak yang tidak punya makna wajah)."
     )
 
 face_cascade = load_face_cascade()
