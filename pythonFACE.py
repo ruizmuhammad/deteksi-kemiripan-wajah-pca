@@ -217,7 +217,8 @@ st.markdown(
     Preprocessing (grayscale, resize, histogram equalization, normalisasi, flatten) →
     Augmentasi kedua wajah (rotasi, flip, brightness, translasi) untuk membentuk dataset
     training → PCA dilatih dari dataset hasil augmentasi → Proyeksi kedua wajah asli ke
-    ruang PCA → Hitung **cosine similarity** → Keputusan mirip / tidak mirip.
+    ruang PCA → Hitung **jarak Euclidean** di ruang PCA (sesuai metode Eigenfaces klasik) →
+    Keputusan mirip / tidak mirip.
     """
 )
 
@@ -225,13 +226,13 @@ st.divider()
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
-    threshold = st.slider(
-        "Threshold Cosine Similarity",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.15,
-        step=0.01,
-        help="Jika similarity >= threshold, wajah dianggap mirip. Nilai default disesuaikan karena dataset training berbasis augmentasi 2 foto (bukan ratusan wajah asli dari banyak orang seperti pada dataset ideal).",
+    distance_threshold = st.slider(
+        "Threshold Euclidean Distance (ruang PCA)",
+        min_value=10.0,
+        max_value=60.0,
+        value=33.0,
+        step=0.5,
+        help="Jika distance <= threshold, wajah dianggap mirip. Eigenfaces klasik (Turk & Pentland) menggunakan jarak Euclidean di ruang PCA sebagai metrik kemiripan -- bukan cosine similarity -- karena makna 'jarak antar wajah' lebih langsung dibanding sudut antar vektor pada ruang ini.",
     )
     n_components = st.slider(
         "Jumlah Komponen Utama PCA (k)",
@@ -246,6 +247,13 @@ with st.sidebar:
         "halus) -- karena tidak ada dataset wajah orang lain yang tersedia. Augmentasi "
         "menjaga struktur wajah tetap konsisten, sehingga PCA belajar arah variasi yang "
         "relevan secara visual (bukan dari noise acak yang tidak punya makna wajah)."
+    )
+    st.caption(
+        "⚠️ Karena training set terbatas (hanya dari augmentasi 2 foto, tanpa wajah "
+        "orang lain sebagai pembanding), pemisahan identitas belum sepenuhnya akurat -- "
+        "terutama untuk pasangan dengan perbedaan usia, pencahayaan, atau kualitas foto "
+        "yang besar. Ini adalah limitasi metodologis PCA/Eigenfaces dengan data terbatas, "
+        "bukan bug pada implementasi."
     )
 
 face_cascade = load_face_cascade()
@@ -295,7 +303,7 @@ if file_1 and file_2:
 
         similarity = pca_result["similarity"]
         distance = pca_result["distance"]
-        is_similar = similarity >= threshold
+        is_similar = distance <= distance_threshold
 
         st.divider()
         st.subheader("📊 Hasil Analisis PCA")
@@ -315,21 +323,21 @@ if file_1 and file_2:
 
         result_col1, result_col2 = st.columns(2)
         with result_col1:
-            st.metric("Cosine Similarity", f"{similarity:.4f}")
-            st.caption(f"Threshold: {threshold}")
-        with result_col2:
             st.metric("Euclidean Distance (ruang PCA)", f"{distance:.4f}")
+            st.caption(f"Threshold: {distance_threshold} (semakin kecil = semakin mirip)")
+        with result_col2:
+            st.metric("Cosine Similarity (info tambahan)", f"{similarity:.4f}")
 
         if is_similar:
             st.success(
                 f"✅ **WAJAH MIRIP**\n\n"
-                f"Similarity ({similarity:.4f}) >= Threshold ({threshold}) "
+                f"Distance ({distance:.4f}) <= Threshold ({distance_threshold}) "
                 f"→ kedua wajah dianggap **mirip**."
             )
         else:
             st.error(
                 f"❌ **WAJAH TIDAK MIRIP**\n\n"
-                f"Similarity ({similarity:.4f}) < Threshold ({threshold}) "
+                f"Distance ({distance:.4f}) > Threshold ({distance_threshold}) "
                 f"→ kedua wajah dianggap **tidak mirip**."
             )
 
