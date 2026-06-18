@@ -65,7 +65,8 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12
     terkecil (lebih aman daripada kandidat yang kebesaran).
     """
     # center crop dulu sebelum deteksi
-    img_bgr = center_crop(img_bgr, crop_ratio=0.65)
+    # pakai 0.80 supaya wajah yang tidak close-up (kecil di frame) tetap kedeteksi utuh
+    img_bgr = center_crop(img_bgr, crop_ratio=0.80)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
     min_dim = min(h_img, w_img)
@@ -139,84 +140,46 @@ def process_uploaded_image(uploaded_file, face_cascade):
     }
 
 
-def augment_face(face_img_100x100: np.ndarray, rng: np.random.Generator, n_variations: int = 50) -> list:
+@st.cache_resource(show_spinner="Mengunduh dataset LFW untuk training PCA (hanya sekali)...")
+def load_lfw_dataset():
     """
-    Bikin variasi (augmentasi) dari SATU gambar wajah yang sudah di-resize 100x100.
-    Setiap variasi tetap wajah yang SAMA secara struktur (mata/hidung/mulut di posisi
-    yang konsisten secara relatif), hanya beda pose ringan (rotasi, scaling, translasi
-    kecil), pencahayaan, flip, dan noise halus.
+    Load dataset LFW (Labeled Faces in the Wild) dari scikit-learn.
+    Dataset ini berisi ribuan foto wajah dari berbagai orang, digunakan sebagai
+    training set PCA supaya eigenfaces yang dihasilkan benar-benar merepresentasikan
+    struktur wajah manusia secara umum -- bukan hanya dari 2 foto yang diupload.
 
-    Ini menggantikan pendekatan sebelumnya yang memakai noise acak murni + blur sebagai
-    dataset training. Noise acak tidak punya struktur wajah sama sekali, sehingga arah
-    eigenvector yang dihasilkan PCA tidak ada hubungannya dengan fitur wajah manusia --
-    similarity yang dihasilkan jadi tergantung seed acak (terbukti goyang antara positif
-    dan negatif kalau seed diganti). Dengan augmentasi dari wajah ASLI yang diupload,
-    struktur wajah (posisi mata, hidung, kontur) tetap konsisten di semua sampel training,
-    sehingga PCA belajar arah-arah variasi yang relevan secara visual -- sesuai prinsip
-    dasar Eigenfaces (Turk & Pentland).
+    resize=0.4 menghasilkan gambar ~50x37, lalu di-resize ke 100x100.
+    min_faces_per_person=20 supaya dataset tidak terlalu besar.
     """
-    variations = []
-    h, w = face_img_100x100.shape
-    center = (w // 2, h // 2)
-
-    for _ in range(n_variations):
-        angle = rng.uniform(-10, 10)
-        scale = rng.uniform(0.95, 1.05)
-        tx = rng.uniform(-3, 3)
-        ty = rng.uniform(-3, 3)
-        brightness = rng.uniform(-15, 15)
-        flip = rng.random() < 0.5
-
-        rot_matrix = cv2.getRotationMatrix2D(center, angle, scale)
-        rot_matrix[0, 2] += tx
-        rot_matrix[1, 2] += ty
-        transformed = cv2.warpAffine(
-            face_img_100x100, rot_matrix, (w, h), borderMode=cv2.BORDER_REPLICATE
-        )
-
-        bright = np.clip(transformed.astype(np.float64) + brightness, 0, 255).astype(np.uint8)
-        img = cv2.flip(bright, 1) if flip else bright
-
-        noise = rng.normal(0, 2, size=img.shape)
-        img_noisy = np.clip(img.astype(np.float64) + noise, 0, 255).astype(np.uint8)
-        variations.append(img_noisy)
-
-    return variations
-
-
-def build_training_dataset(face1_equalized: np.ndarray, face2_equalized: np.ndarray, n_variations: int = 50):
-    """
-    Bangun dataset training untuk PCA dari AUGMENTASI dua wajah yang diupload
-    (bukan dari noise acak). Karena tidak ada dataset wajah orang lain yang
-    tersedia, training set diperluas dengan augmentasi (rotasi ringan, flip,
-    perubahan brightness, translasi kecil, noise halus) dari kedua foto asli.
-    Ini menjaga struktur wajah tetap konsisten sehingga PCA bisa belajar arah-arah
-    variasi yang benar-benar relevan terhadap fitur wajah (eigenfaces yang valid),
-    bukan arah dari noise acak yang tidak punya makna visual.
-    """
-    rng = np.random.default_rng(seed=42)
-
-    aug_1 = augment_face(face1_equalized, rng, n_variations=n_variations)
-    aug_2 = augment_face(face2_equalized, rng, n_variations=n_variations)
-
-    all_faces = aug_1 + aug_2
-    X = np.array([f.flatten() / 255.0 for f in all_faces])
-    return X
+    from sklearn.datasets import fetch_lfw_people
+    lfw = fetch_lfw_people(min_faces_per_person=20, resize=0.4)
+    # resize semua gambar ke 100x100 dan normalisasi
+    X = []
+    for img in lfw.images:
+        resized = cv2.resize(img, IMG_SIZE)
+        equalized = cv2.equalizeHist((resized * 255).astype(np.uint8))
+        X.append(equalized.flatten() / 255.0)
+    return np.array(X)
 
 
 def compute_pca_similarity(face1_equalized: np.ndarray, face2_equalized: np.ndarray,
                             vector_1: np.ndarray, vector_2: np.ndarray, n_components: int):
-    # bangun dataset training (X) berisi augmentasi dari kedua wajah asli
-    X_train = build_training_dataset(face1_equalized, face2_equalized)
+    """
+    PCA dilatih dari dataset LFW (ribuan wajah nyata), bukan augmentasi 2 foto.
+    Dengan training set yang beragam, eigenfaces yang dihasilkan benar-benar
+    menangkap struktur wajah manusia secara umum, sehingga proyeksi wajah
+    dari foto yang berbeda usia/kondisi bisa lebih akurat dibandingkan.
+    """
+    X_train = load_lfw_dataset()
 
     max_components = min(X_train.shape[0], X_train.shape[1])
     n_components = min(n_components, max_components)
 
-    # PCA dilatih dari dataset training (X_c = X - mean, lalu SVD)
+    # PCA dilatih dari dataset LFW (X_c = X - mean, lalu SVD)
     pca = PCA(n_components=n_components)
     pca.fit(X_train)
 
-    # proyeksikan dua wajah ASLI (bukan dataset training) ke ruang PCA
+    # proyeksikan dua wajah yang diupload ke ruang PCA
     Z = pca.transform(np.array([vector_1, vector_2]))
 
     z1 = Z[0].reshape(1, -1)
@@ -246,10 +209,9 @@ st.markdown(
 
     **Alur proses:** Upload gambar → Deteksi & crop wajah (Haar Cascade) →
     Preprocessing (grayscale, resize, histogram equalization, normalisasi, flatten) →
-    Augmentasi kedua wajah (rotasi, flip, brightness, translasi) untuk membentuk dataset
-    training → PCA dilatih dari dataset hasil augmentasi → Proyeksi kedua wajah asli ke
-    ruang PCA → Hitung **jarak Euclidean** di ruang PCA (sesuai metode Eigenfaces klasik) →
-    Keputusan mirip / tidak mirip.
+    PCA dilatih dari **dataset LFW** (ribuan wajah nyata) → Proyeksi kedua wajah yang
+    diupload ke ruang PCA → Hitung **jarak Euclidean** di ruang PCA (sesuai metode
+    Eigenfaces klasik) → Keputusan mirip / tidak mirip.
     """
 )
 
@@ -273,18 +235,16 @@ with st.sidebar:
         help="Jumlah dimensi hasil reduksi PCA. PCA dilatih dari dataset hasil augmentasi, lalu kedua wajah asli diproyeksikan ke ruang ini.",
     )
     st.caption(
-        "ℹ️ PCA dilatih dari dataset hasil **augmentasi** kedua wajah yang diupload "
-        "(rotasi ringan, flip horizontal, perubahan brightness, translasi kecil, noise "
-        "halus) -- karena tidak ada dataset wajah orang lain yang tersedia. Augmentasi "
-        "menjaga struktur wajah tetap konsisten, sehingga PCA belajar arah variasi yang "
-        "relevan secara visual (bukan dari noise acak yang tidak punya makna wajah)."
+        "ℹ️ PCA dilatih dari **dataset LFW (Labeled Faces in the Wild)** — "
+        "ribuan foto wajah nyata dari berbagai orang. Dataset ini diunduh otomatis "
+        "saat pertama kali app dijalankan (~200MB, hanya sekali). Dengan training set "
+        "yang beragam, eigenfaces yang dihasilkan merepresentasikan struktur wajah "
+        "manusia secara umum, bukan hanya variasi dari 2 foto yang diupload."
     )
     st.caption(
-        "⚠️ Karena training set terbatas (hanya dari augmentasi 2 foto, tanpa wajah "
-        "orang lain sebagai pembanding), pemisahan identitas belum sepenuhnya akurat -- "
-        "terutama untuk pasangan dengan perbedaan usia, pencahayaan, atau kualitas foto "
-        "yang besar. Ini adalah limitasi metodologis PCA/Eigenfaces dengan data terbatas, "
-        "bukan bug pada implementasi."
+        "⚠️ Meski menggunakan dataset LFW, PCA/Eigenfaces tetap memiliki keterbatasan "
+        "pada perbedaan usia ekstrem (balita vs dewasa) karena proporsi geometris wajah "
+        "berubah signifikan. Ini adalah limitasi metodologis PCA klasik, bukan bug implementasi."
     )
 
 face_cascade = load_face_cascade()
