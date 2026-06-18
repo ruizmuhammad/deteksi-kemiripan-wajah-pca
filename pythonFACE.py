@@ -29,24 +29,57 @@ def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
     return bgr_image
 
 
-def detect_and_crop_face(img_bgr: np.ndarray, face_cascade):
-    # deteksi wajah, kalau ketemu langsung crop area wajahnya
+def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3):
+    """
+    Deteksi wajah dengan Haar Cascade, lalu crop dengan margin proporsional.
+
+    Catatan penting: Haar Cascade kadang menghasilkan beberapa kandidat bbox untuk
+    satu wajah yang sama -- salah satunya bisa jadi area "kepala + leher/bahu" yang
+    kebesaran (bukan wajah murni). Kalau langsung ambil bbox dengan area terbesar
+    (seperti versi sebelumnya), itu bisa salah pilih kandidat yang kebesaran ini,
+    sehingga rasio crop antar foto jadi tidak konsisten (foto A ke-crop pas di wajah,
+    foto B ke-crop sampai bahu) -- akibatnya PCA menangkap "seberapa ketat crop-nya"
+    bukan fitur wajah itu sendiri. Untuk mengurangi risiko ini, kandidat bbox difilter
+    dulu berdasarkan rasio ukuran yang wajar untuk wajah (sekitar 20-45% dari lebar
+    gambar); kalau tidak ada yang masuk rentang itu, fallback ke kandidat terkecil
+    (lebih aman daripada kandidat yang kebesaran).
+
+    Margin ditambahkan di semua sisi supaya dahi dan dagu konsisten ikut ter-crop,
+    membantu alignment antar foto yang berbeda jarak/sudut kamera.
+    """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h_img, w_img = gray.shape
+    min_dim = min(h_img, w_img)
 
     faces = face_cascade.detectMultiScale(
         gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
+        scaleFactor=1.05,
+        minNeighbors=8,
+        minSize=(int(min_dim * 0.15), int(min_dim * 0.15)),
     )
 
     if len(faces) == 0:
         return None, gray, None
 
-    # ambil wajah dengan area paling besar
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-    face_crop = gray[y:y + h, x:x + w]
+    target_ratio_range = (0.20, 0.45)
+    candidates_in_range = [f for f in faces if target_ratio_range[0] <= f[2] / w_img <= target_ratio_range[1]]
 
-    return face_crop, gray, (x, y, w, h)
+    if candidates_in_range:
+        x, y, w, h = max(candidates_in_range, key=lambda f: f[2] * f[3])
+    else:
+        # tidak ada kandidat dengan rasio wajar -> ambil yang terkecil sebagai fallback
+        # (lebih aman daripada salah ambil area kepala+bahu yang kebesaran)
+        x, y, w, h = min(faces, key=lambda f: f[2] * f[3])
+
+    mx, my = int(w * margin), int(h * margin)
+    x0 = max(0, x - mx)
+    y0 = max(0, y - my)
+    x1 = min(w_img, x + w + mx)
+    y1 = min(h_img, y + h + my)
+
+    face_crop = gray[y0:y1, x0:x1]
+
+    return face_crop, gray, (x0, y0, x1 - x0, y1 - y0)
 
 
 def preprocess_face(face_gray: np.ndarray) -> np.ndarray:
@@ -80,29 +113,71 @@ def process_uploaded_image(uploaded_file, face_cascade):
     }
 
 
-def build_training_dataset(vector_1: np.ndarray, vector_2: np.ndarray, n_random_faces: int = 100):
-    # sesuai dokumen, PCA seharusnya dilatih dari dataset wajah (banyak sampel),
-    # bukan cuma dari 2 gambar yang mau dibandingkan.
-    # karena tidak ada dataset wajah orang lain, dataset training dibentuk dari
-    # wajah-wajah acak independen (bukan turunan dari vector_1/vector_2),
-    # supaya rata-rata dataset (mean face) tidak bias ke titik tengah antara
-    # dua wajah yang dibandingkan.
-    rng = np.random.default_rng(seed=7)
-    n_features = vector_1.shape[0]
+def augment_face(face_img_100x100: np.ndarray, rng: np.random.Generator, n_variations: int = 40) -> list:
+    """
+    Bikin variasi (augmentasi) dari SATU gambar wajah yang sudah di-resize 100x100.
+    Setiap variasi tetap wajah yang SAMA secara struktur (mata/hidung/mulut di posisi
+    yang konsisten secara relatif), hanya beda pose ringan (rotasi, scaling, translasi
+    kecil), pencahayaan, flip, dan noise halus. Parameter diambil secara acak kontinu
+    (bukan grid kombinasi tetap) supaya variasi lebih kaya dan tidak ada pola berulang
+    yang bisa dipelajari PCA sebagai "fitur palsu".
 
-    random_faces = rng.uniform(low=0.2, high=0.8, size=(n_random_faces, n_features))
-    for i in range(n_random_faces):
-        face_2d = random_faces[i].reshape(IMG_SIZE)
-        face_2d = cv2.GaussianBlur(face_2d, (21, 21), 0)
-        random_faces[i] = face_2d.flatten()
+    Ini supaya PCA dilatih dari variasi wajah ASLI, bukan dari noise acak yang tidak
+    ada hubungannya dengan struktur wajah manusia.
+    """
+    variations = []
+    h, w = face_img_100x100.shape
+    center = (w // 2, h // 2)
 
-    X = np.vstack([random_faces, vector_1.reshape(1, -1), vector_2.reshape(1, -1)])
+    for _ in range(n_variations):
+        angle = rng.uniform(-10, 10)
+        scale = rng.uniform(0.95, 1.05)
+        tx = rng.uniform(-3, 3)
+        ty = rng.uniform(-3, 3)
+        brightness = rng.uniform(-15, 15)
+        flip = rng.random() < 0.5
+
+        rot_matrix = cv2.getRotationMatrix2D(center, angle, scale)
+        rot_matrix[0, 2] += tx
+        rot_matrix[1, 2] += ty
+        transformed = cv2.warpAffine(
+            face_img_100x100, rot_matrix, (w, h), borderMode=cv2.BORDER_REPLICATE
+        )
+
+        bright = np.clip(transformed.astype(np.float64) + brightness, 0, 255).astype(np.uint8)
+        img = cv2.flip(bright, 1) if flip else bright
+
+        noise = rng.normal(0, 2, size=img.shape)
+        img_noisy = np.clip(img.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+        variations.append(img_noisy)
+
+    return variations
+
+
+def build_training_dataset(face1_equalized: np.ndarray, face2_equalized: np.ndarray):
+    """
+    Bangun dataset training untuk PCA dari AUGMENTASI dua wajah yang diupload
+    (bukan dari noise acak). Karena tidak ada dataset wajah orang lain yang
+    tersedia, training set diperluas dengan augmentasi (rotasi ringan, flip,
+    perubahan brightness, noise halus) dari kedua foto asli. Ini menjaga
+    struktur wajah tetap konsisten sehingga PCA bisa belajar arah-arah variasi
+    yang benar-benar relevan terhadap fitur wajah (eigenfaces yang valid),
+    bukan arah dari noise acak yang tidak punya makna visual.
+    """
+    rng = np.random.default_rng(seed=42)
+
+    aug_1 = augment_face(face1_equalized, rng, n_variations=40)
+    aug_2 = augment_face(face2_equalized, rng, n_variations=40)
+
+    all_faces = aug_1 + aug_2
+    X = np.array([f.flatten() / 255.0 for f in all_faces])
     return X
 
 
-def compute_pca_similarity(vector_1: np.ndarray, vector_2: np.ndarray, n_components: int):
-    # bangun dataset training (X) berisi wajah-wajah acak + kedua wajah upload
-    X_train = build_training_dataset(vector_1, vector_2)
+def compute_pca_similarity(face1_equalized: np.ndarray, face2_equalized: np.ndarray,
+                            vector_1: np.ndarray, vector_2: np.ndarray, n_components: int):
+    # bangun dataset training (X) berisi augmentasi dari kedua wajah asli
+    X_train = build_training_dataset(face1_equalized, face2_equalized)
 
     max_components = min(X_train.shape[0], X_train.shape[1])
     n_components = min(n_components, max_components)
@@ -111,7 +186,7 @@ def compute_pca_similarity(vector_1: np.ndarray, vector_2: np.ndarray, n_compone
     pca = PCA(n_components=n_components)
     pca.fit(X_train)
 
-    # proyeksikan dua wajah ASLI (bukan dataset training) ke ruang PCA
+    # proyeksikan dua wajah ASLI (bukan versi augmentasi) ke ruang PCA
     Z = pca.transform(np.array([vector_1, vector_2]))
 
     z1 = Z[0].reshape(1, -1)
@@ -128,6 +203,7 @@ def compute_pca_similarity(vector_1: np.ndarray, vector_2: np.ndarray, n_compone
         "z2": z2.flatten(),
         "explained_variance": explained_variance,
         "n_components_used": n_components,
+        "n_training_samples": X_train.shape[0],
     }
 
 
@@ -139,8 +215,10 @@ st.markdown(
     **PCA (Principal Component Analysis)** berbasis **SVD**.
 
     **Alur proses:** Upload gambar → Deteksi & crop wajah (Haar Cascade) →
-    Preprocessing (grayscale, resize, histogram equalization, normalisasi, flatten) → PCA →
-    Proyeksi ke ruang PCA → Hitung **cosine similarity** → Keputusan mirip / tidak mirip.
+    Preprocessing (grayscale, resize, histogram equalization, normalisasi, flatten) →
+    Augmentasi kedua wajah (rotasi, flip, brightness) untuk membentuk dataset training →
+    PCA dilatih dari dataset hasil augmentasi → Proyeksi kedua wajah asli ke ruang PCA →
+    Hitung **cosine similarity** → Keputusan mirip / tidak mirip.
     """
 )
 
@@ -152,21 +230,23 @@ with st.sidebar:
         "Threshold Cosine Similarity",
         min_value=0.0,
         max_value=1.0,
-        value=0.15,
+        value=0.5,
         step=0.01,
-        help="Jika similarity >= threshold, wajah dianggap mirip. Nilai default disesuaikan karena dataset training berbasis wajah acak (bukan ratusan wajah asli seperti pada dokumen).",
+        help="Jika similarity >= threshold, wajah dianggap mirip.",
     )
     n_components = st.slider(
         "Jumlah Komponen Utama PCA (k)",
         min_value=2,
-        max_value=20,
-        value=10,
-        help="Jumlah dimensi hasil reduksi PCA. Sesuai dokumen, PCA dilatih dari dataset (bukan cuma 2 gambar), lalu kedua wajah diproyeksikan ke ruang ini.",
+        max_value=30,
+        value=15,
+        help="Jumlah dimensi hasil reduksi PCA. PCA dilatih dari dataset augmentasi, lalu kedua wajah asli diproyeksikan ke ruang ini.",
     )
     st.caption(
-        "ℹ️ PCA dilatih dari dataset berisi wajah-wajah acak sebagai basis ruang "
-        "eigenfaces (karena tidak ada dataset wajah orang lain), lalu kedua wajah "
-        "asli diproyeksikan ke ruang PCA tersebut untuk dibandingkan — mengikuti alur pada dokumen."
+        "ℹ️ PCA dilatih dari dataset hasil **augmentasi** kedua wajah yang diupload "
+        "(rotasi ringan, flip horizontal, perubahan brightness, noise halus) — karena "
+        "tidak ada dataset wajah orang lain yang tersedia. Augmentasi menjaga struktur "
+        "wajah tetap konsisten, sehingga PCA belajar arah variasi yang relevan secara "
+        "visual (bukan dari noise acak)."
     )
 
 face_cascade = load_face_cascade()
@@ -209,7 +289,9 @@ if file_1 and file_2:
             )
 
         pca_result = compute_pca_similarity(
-            result_1["vector"], result_2["vector"], n_components=n_components
+            result_1["resized_face"], result_2["resized_face"],
+            result_1["vector"], result_2["vector"],
+            n_components=n_components,
         )
 
         similarity = pca_result["similarity"]
@@ -219,13 +301,15 @@ if file_1 and file_2:
         st.divider()
         st.subheader("📊 Hasil Analisis PCA")
 
-        info_col1, info_col2, info_col3 = st.columns(3)
+        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
         with info_col1:
             st.metric("Dimensi Asli (per gambar)", f"{result_1['vector'].shape[0]} fitur")
         with info_col2:
             st.metric("Dimensi Setelah PCA (k)", f"{pca_result['n_components_used']} fitur")
         with info_col3:
             st.metric("Explained Variance", f"{pca_result['explained_variance']*100:.2f}%")
+        with info_col4:
+            st.metric("Sampel Training (augmentasi)", f"{pca_result['n_training_samples']}")
 
         st.divider()
         st.subheader("🎯 Hasil Perbandingan")
