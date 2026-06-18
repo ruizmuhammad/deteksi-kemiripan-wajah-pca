@@ -29,11 +29,26 @@ def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
     return bgr_image
 
 
+def center_crop(img_bgr: np.ndarray, crop_ratio: float = 0.65) -> np.ndarray:
+    """
+    Crop bagian tengah gambar sebelum deteksi wajah.
+    Tujuannya buang area pinggir (rambut samping, kuping, background) supaya
+    Haar Cascade lebih fokus ke area wajah dan tidak salah deteksi pinggiran.
+    crop_ratio=0.65 artinya ambil 65% tengah dari lebar dan tinggi gambar.
+    """
+    h, w = img_bgr.shape[:2]
+    margin_x = int(w * (1 - crop_ratio) / 2)
+    margin_y = int(h * (1 - crop_ratio) / 2)
+    return img_bgr[margin_y:h - margin_y, margin_x:w - margin_x]
+
+
 def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12):
     """
     Deteksi wajah dengan Haar Cascade, lalu crop dengan margin proporsional.
 
     Perubahan dari versi sebelumnya:
+    - center crop dulu sebelum deteksi (ambil 65% tengah) supaya rambut samping,
+      kuping, dan background pinggir tidak mengganggu Haar Cascade
     - margin dikurangi dari 0.3 ke 0.12 supaya crop tidak melar ke dahi/leher
     - target_ratio_range diperketat dari (0.20, 0.45) ke (0.25, 0.40)
     - minNeighbors dinaikkan dari 8 ke 10 supaya Haar Cascade lebih strict
@@ -49,6 +64,8 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12
     lebar gambar); kalau tidak ada yang masuk rentang itu, fallback ke kandidat
     terkecil (lebih aman daripada kandidat yang kebesaran).
     """
+    # center crop dulu sebelum deteksi
+    img_bgr = center_crop(img_bgr, crop_ratio=0.65)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
     min_dim = min(h_img, w_img)
