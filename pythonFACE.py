@@ -29,9 +29,15 @@ def pil_to_cv2(pil_image: Image.Image) -> np.ndarray:
     return bgr_image
 
 
-def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3):
+def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12):
     """
     Deteksi wajah dengan Haar Cascade, lalu crop dengan margin proporsional.
+
+    Perubahan dari versi sebelumnya:
+    - margin dikurangi dari 0.3 ke 0.12 supaya crop tidak melar ke dahi/leher
+    - target_ratio_range diperketat dari (0.20, 0.45) ke (0.25, 0.40)
+    - minNeighbors dinaikkan dari 8 ke 10 supaya Haar Cascade lebih strict
+      dan mengurangi false detection (misal tangan/background terdeteksi sebagai wajah)
 
     Catatan: Haar Cascade kadang menghasilkan beberapa kandidat bbox untuk satu
     wajah yang sama -- salah satunya bisa jadi area "kepala + leher/bahu" yang
@@ -39,7 +45,7 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3)
     itu bisa salah pilih kandidat yang kebesaran ini, sehingga rasio crop antar
     foto jadi tidak konsisten dan PCA jadi menangkap "seberapa ketat crop-nya"
     bukan fitur wajah itu sendiri. Untuk mengurangi risiko ini, kandidat bbox
-    difilter dulu berdasarkan rasio ukuran yang wajar untuk wajah (20-45% dari
+    difilter dulu berdasarkan rasio ukuran yang wajar untuk wajah (25-40% dari
     lebar gambar); kalau tidak ada yang masuk rentang itu, fallback ke kandidat
     terkecil (lebih aman daripada kandidat yang kebesaran).
     """
@@ -50,14 +56,14 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.3)
     faces = face_cascade.detectMultiScale(
         gray,
         scaleFactor=1.05,
-        minNeighbors=8,
-        minSize=(int(min_dim * 0.15), int(min_dim * 0.15)),
+        minNeighbors=10,
+        minSize=(int(min_dim * 0.20), int(min_dim * 0.20)),
     )
 
     if len(faces) == 0:
         return None, gray, None
 
-    target_ratio_range = (0.20, 0.45)
+    target_ratio_range = (0.25, 0.40)
     candidates_in_range = [f for f in faces if target_ratio_range[0] <= f[2] / w_img <= target_ratio_range[1]]
 
     if candidates_in_range:
