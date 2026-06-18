@@ -78,7 +78,8 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12
     )
 
     if len(faces) == 0:
-        return None, gray, None
+        # fallback: pakai center crop langsung (cocok untuk selfie close-up)
+        return gray, gray, (0, 0, w_img, h_img)
 
     target_ratio_range = (0.25, 0.40)
     candidates_in_range = [f for f in faces if target_ratio_range[0] <= f[2] / w_img <= target_ratio_range[1]]
@@ -88,6 +89,14 @@ def detect_and_crop_face(img_bgr: np.ndarray, face_cascade, margin: float = 0.12
     else:
         # tidak ada kandidat dengan rasio wajar -> ambil yang terkecil sebagai fallback
         x, y, w, h = min(faces, key=lambda f: f[2] * f[3])
+
+    # validasi: kalau bbox terlalu kecil (< 10% area gambar), kemungkinan
+    # Haar Cascade salah deteksi sebagian wajah saja -> fallback ke seluruh
+    # gambar yang sudah di-center-crop
+    bbox_area = w * h
+    img_area = w_img * h_img
+    if bbox_area < img_area * 0.10:
+        return gray, gray, (0, 0, w_img, h_img)
 
     mx, my = int(w * margin), int(h * margin)
     x0 = max(0, x - mx)
@@ -115,10 +124,9 @@ def process_uploaded_image(uploaded_file, face_cascade):
 
     face_crop, full_gray, bbox = detect_and_crop_face(img_bgr, face_cascade)
 
-    face_detected = face_crop is not None
-    if not face_detected:
-        # kalau wajah ga ketemu, pakai gambar penuh sebagai fallback
-        face_crop = full_gray
+    # face_detected True kalau bbox bukan seluruh gambar (artinya Haar Cascade berhasil)
+    h_img, w_img = full_gray.shape
+    face_detected = bbox != (0, 0, w_img, h_img)
 
     vector, resized_face = preprocess_face(face_crop)
 
