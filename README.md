@@ -29,13 +29,3 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## 🌐 Demo
-
-Link Streamlit: *(isi setelah deploy)*
-
-## 📄 Referensi Konsep
-
-Implementasi ini mengikuti konsep matematis PCA/SVD untuk deteksi kemiripan wajah:
-data wajah direpresentasikan sebagai vektor berdimensi tinggi, direduksi dimensinya
-melalui PCA (SVD), kemudian dibandingkan menggunakan cosine similarity di ruang
-berdimensi rendah tersebut.
